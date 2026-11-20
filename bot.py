@@ -286,6 +286,18 @@ def _field(value, name, default=None):
     return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
 
 
+def _safe_error_detail(exc):
+    """Keep useful exception context without logging URLs or credential-like values."""
+    message = str(exc)
+    message = re.sub(r"https?://\S+", "[URL redacted]", message, flags=re.IGNORECASE)
+    message = re.sub(r"(?i)\b\S*(?:secret|credential|api[_ -]?key)\S*\b", "[credential redacted]", message)
+    message = re.sub(r"(?i)\b(bearer|token|api[_ -]?key|secret)\s*[:=]?\s*\S+",
+                     r"\1=[redacted]", message)
+    message = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "[value redacted]", message)
+    message = " ".join(message.split())[:300]
+    return f"{type(exc).__name__}: {message or '[no message]'}"
+
+
 def recover_interrupted_sends(conn):
     """Under the process lock, quarantine every interrupted POST."""
     with Transaction(conn):
@@ -389,15 +401,19 @@ class Orchestrator:
 
     def _analyze(self, row, deadline):
         article_id = row["id"]
+        stage = "preparing article"
         try:
             item = self._item(row)
+            stage = "fetching article text"
             text = self._call(self.sources.get_article_text, item, timeout=ARTICLE_TIMEOUT, deadline=deadline)
             if not isinstance(text, str):
                 raise ValueError("invalid article text")
             recent = self._recent()
             revision = self._revision()
+            stage = "CoArena summarization request"
             result = self._call(self.clients.summarize, item, text, recent,
                                 self.config.api_key, self.config.model, timeout=AI_TIMEOUT, deadline=deadline)
+            stage = "validating CoArena summary"
             gaming = _field(result, "is_gaming_news")
             duplicate = _field(result, "is_duplicate")
             duplicate_of = _field(result, "duplicate_of")
@@ -417,8 +433,9 @@ class Orchestrator:
             if status == "ready" and not all(isinstance(v, str) and v.strip() for v in fields):
                 raise ValueError("incomplete summary")
             fields = [v if isinstance(v, str) else "" for v in fields]
-        except Exception:
-            LOG.warning("Article %d analysis failed; queued for retry", article_id)
+        except Exception as exc:
+            LOG.warning("Article %d analysis failed during %s (%s); queued for retry",
+                        article_id, stage, _safe_error_detail(exc))
             self._retry_pending(article_id)
             return False
         with Transaction(self.db):
