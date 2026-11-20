@@ -1,0 +1,30 @@
+name: Wake Railway worker
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: pixelbot-wake
+  cancel-in-progress: false
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Wake the worker, if configured
+        env:
+          WAKE_URL: ${{ vars.RAILWAY_WAKE_URL }}
+          WAKE_TOKEN: ${{ secrets.RAILWAY_WAKE_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "$WAKE_URL" ] || [ -z "$WAKE_TOKEN" ]; then
+            echo 'Wake URL or token not configured; skipping.'
+            exit 0
+          fi
+          case "$WAKE_URL" in
+            https://*.up.railway.app/wake) ;;
+            *) echo 'Wake URL must be an HTTPS Railway domain ending in /wake.' >&2; exit 1 ;;
+          esac
+          curl --fail --silent --show-error --connect-timeout 15 --max-time 40 --retry 2 \
+            -H "Authorization: Bearer $WAKE_TOKEN" "$WAKE_URL" > /dev/null
