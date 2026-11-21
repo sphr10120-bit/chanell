@@ -369,7 +369,7 @@ def send_message(bot_token: str, chat_id: str | int, title: str,
         raise ValueError("A title and two non-empty paragraphs are required")
     text = (f"<b>🟦 {html.escape(title)}</b>\n\n"
             f"{html.escape(paragraph1)}\n\n{html.escape(paragraph2)}\n\n"
-            "<b>🆔️ @pixelmediair</b>")
+            '<b><a href="https://t.me/pixelmediair">🔷 pixel media</a></b>')
     try:
         response = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={
             "chat_id": chat_id, "text": text, "parse_mode": "HTML",

@@ -327,7 +327,7 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(kwargs["json"]["text"],
                          '<b>🟦 بازی &lt;نو&gt; &amp; هیجان</b>\n\n'
                          'متن &lt;اول&gt; &amp; چیزها\n\nپاراگراف دوم &quot;خوب&quot;\n\n'
-                         '<b>🆔️ @pixelmediair</b>')
+                         '<b><a href="https://t.me/pixelmediair">🔷 pixel media</a></b>')
         self.assertFalse(kwargs["allow_redirects"])
         self.assertEqual(kwargs["timeout"], clients.TELEGRAM_TIMEOUT)
 
@@ -342,7 +342,7 @@ class TelegramTests(unittest.TestCase):
         self.assertLessEqual(len(sections[1]), clients.MAX_PARAGRAPH_CHARS)
         self.assertLessEqual(len(sections[2]), clients.MAX_PARAGRAPH_CHARS)
         self.assertTrue(sections[1].endswith("…"))
-        self.assertEqual(sections[-1], "<b>🆔️ @pixelmediair</b>")
+        self.assertEqual(sections[-1], '<b><a href="https://t.me/pixelmediair">🔷 pixel media</a></b>')
         clients.send_message("123:token", "@channel", "عنوان " * 50, "الف", "ب")
         title = post.call_args.kwargs["json"]["text"].split("\n\n")[0][len("<b>🟦 "):-len("</b>")]
         self.assertLessEqual(len(title), clients.MAX_TITLE_CHARS)
