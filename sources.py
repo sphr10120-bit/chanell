@@ -225,8 +225,9 @@ def _xml(data: bytes) -> ET.Element:
 
 
 def _recent(date: str | None) -> bool:
-    if not date:
-        return True
+    # Fail closed: an undated or malformed item cannot be proven fresh.
+    if not isinstance(date, str) or not date.strip():
+        return False
     try:
         try:
             parsed = datetime.fromisoformat(date.strip().replace("Z", "+00:00"))
@@ -236,8 +237,8 @@ def _recent(date: str | None) -> bool:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed >= datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
     except (ValueError, TypeError, OverflowError):
-        # Preserve an unparseable publisher date, rather than inventing a timestamp.
-        return True
+        # Never let an unparseable publisher date become an implicitly fresh post.
+        return False
 
 
 def _dedupe(items: list[NewsItem]) -> list[NewsItem]:

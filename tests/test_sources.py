@@ -160,6 +160,16 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn("vigiato", results)
         self.assertEqual(len(results), 3)
 
+    def test_missing_invalid_and_old_publication_dates_are_filtered(self):
+        self.routes[sources._URLS["gamefa"]] = Response(rss(
+            item("no date", "https://gamefa.com/101/no-date/", date="")
+            + item("invalid date", "https://gamefa.com/102/invalid-date/", date="not-a-date")
+            + item("old date", "https://gamefa.com/103/old-date/", date=OLD)
+            + item("fresh date", "https://gamefa.com/104/fresh-date/", date=TODAY)))
+        result, errors = sources.collect()
+        self.assertEqual(errors, {})
+        self.assertEqual([entry.title for entry in result["gamefa"]], ["fresh date"])
+
     def test_deduplicates_and_caps_feed(self):
         entries = "".join(item(str(i), f"https://gamefa.com/{i}/story/") for i in range(40))
         self.routes[sources._URLS["gamefa"]] = Response(rss(entries + item("duplicate", "https://gamefa.com/1/story/")))
