@@ -231,6 +231,12 @@ CREATE TABLE IF NOT EXISTS delivery_resolutions (
     resolution TEXT NOT NULL,
     resolved_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS delivery_failures (
+    article_id INTEGER PRIMARY KEY REFERENCES articles(id),
+    status_code INTEGER NOT NULL,
+    detail TEXT NOT NULL,
+    failed_at REAL NOT NULL
+);
 """
 
 
@@ -327,6 +333,20 @@ def resolve_unknown(conn, article_id, *, delivered):
             resolution = "confirmed_not_delivered"
         conn.execute("INSERT INTO delivery_resolutions(article_id,resolution,resolved_at) VALUES (?,?,?)",
                      (article_id, resolution, now))
+
+
+def retry_delivery_failure(conn, article_id):
+    """Requeue a permanently rejected post after an operator fixes the cause."""
+    with Transaction(conn):
+        row = conn.execute("""SELECT a.id FROM articles a JOIN delivery_failures f
+                              ON f.article_id=a.id WHERE a.id=? AND a.status='skipped'""",
+                           (article_id,)).fetchone()
+        if row is None:
+            raise ValueError("Article is not a recorded delivery failure")
+        now = time.time()
+        conn.execute("UPDATE articles SET status='ready', next_attempt=0, updated_at=? WHERE id=?",
+                     (now, article_id))
+        conn.execute("DELETE FROM delivery_failures WHERE article_id=?", (article_id,))
 
 
 class Orchestrator:
@@ -485,10 +505,19 @@ class Orchestrator:
         except Exception as exc:
             if self._definite_rejection(exc):
                 retry_after = getattr(exc, "retry_after", None)
-                delay = max(0, retry_after) if type(retry_after) is int else 0
-                with Transaction(self.db):
-                    self.db.execute("UPDATE articles SET status='ready', next_attempt=?, updated_at=? WHERE id=? AND status='sending'", (time.time() + delay, time.time(), article_id))
-                LOG.error("Telegram explicitly rejected article %d; retry is deferred", article_id)
+                status = getattr(exc, "status_code", None)
+                if status == 429:
+                    delay = max(0, retry_after) if type(retry_after) is int else 0
+                    with Transaction(self.db):
+                        self.db.execute("UPDATE articles SET status='ready', next_attempt=?, updated_at=? WHERE id=? AND status='sending'", (time.time() + delay, time.time(), article_id))
+                    LOG.error("Telegram rate-limited article %d; retry is deferred", article_id)
+                else:
+                    detail = _safe_error_detail(exc)
+                    with Transaction(self.db):
+                        self.db.execute("UPDATE articles SET status='skipped', updated_at=? WHERE id=? AND status='sending'", (time.time(), article_id))
+                        self.db.execute("INSERT OR REPLACE INTO delivery_failures(article_id,status_code,detail,failed_at) VALUES (?,?,?,?)",
+                                        (article_id, status if type(status) is int else 0, detail, time.time()))
+                    LOG.error("ALERT: Telegram permanently rejected article %d; inspect with --list-failed and correct the cause", article_id)
             else:
                 with Transaction(self.db):
                     self.db.execute("UPDATE articles SET status='unknown', updated_at=? WHERE id=? AND status='sending'", (time.time(), article_id))
@@ -566,6 +595,8 @@ def main(argv=None):
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument("--list-unknown", action="store_true", help="list article IDs needing reconciliation (stop worker first)")
     operation.add_argument("--resolve-unknown", type=int, metavar="ID", help="resolve an unknown article after checking Telegram (stop worker first)")
+    operation.add_argument("--list-failed", action="store_true", help="list permanently rejected Telegram posts")
+    operation.add_argument("--retry-failed", type=int, metavar="ID", help="requeue a failed post after correcting its cause")
     decision = parser.add_mutually_exclusive_group()
     decision.add_argument("--delivered", action="store_true", help="confirm the unknown post was delivered")
     decision.add_argument("--not-delivered", action="store_true", help="confirm the unknown post was not delivered")
@@ -575,7 +606,10 @@ def main(argv=None):
             parser.error("--resolve-unknown requires a positive ID and an explicit delivery decision")
     elif args.delivered or args.not_delivered:
         parser.error("delivery decisions require --resolve-unknown")
-    operator_action = args.list_unknown or args.resolve_unknown is not None
+    if args.retry_failed is not None and args.retry_failed <= 0:
+        parser.error("--retry-failed requires a positive ID")
+    operator_action = (args.list_unknown or args.resolve_unknown is not None
+                       or args.list_failed or args.retry_failed is not None)
     if operator_action and (args.once or args.dry_run):
         parser.error("operator actions cannot be combined with --once or --dry-run")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -594,13 +628,21 @@ def main(argv=None):
                         for row in ids:
                             print(row["id"])
                         LOG.info("%d unknown delivery outcome(s)", len(ids))
-                    else:
+                    elif args.resolve_unknown is not None:
                         resolve_unknown(conn, args.resolve_unknown, delivered=args.delivered)
                         LOG.info("Recorded operator-confirmed delivery outcome for article %d", args.resolve_unknown)
+                    elif args.list_failed:
+                        rows = conn.execute("SELECT article_id,status_code,detail FROM delivery_failures ORDER BY article_id").fetchall()
+                        for row in rows:
+                            print(f"{row['article_id']}\tHTTP {row['status_code']}\t{row['detail']}")
+                        LOG.info("%d permanently rejected delivery(s)", len(rows))
+                    else:
+                        retry_delivery_failure(conn, args.retry_failed)
+                        LOG.info("Requeued failed article %d", args.retry_failed)
                 finally:
                     conn.close()
         except ValueError:
-            LOG.error("Article cannot be reconciled; confirm its unknown state and prepared event")
+            LOG.error("Article is not available for the requested operator action")
             return 2
         except (sqlite3.Error, OSError, RuntimeError):
             LOG.error("Storage or lock failure; stop the worker and retry reconciliation")

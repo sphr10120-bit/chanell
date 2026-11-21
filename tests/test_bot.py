@@ -233,6 +233,39 @@ class BotTest(unittest.TestCase):
         self.assertEqual(statuses, ["duplicate", "sent"])
         self.assertEqual(len(self.clients.send_calls), 2)  # no third send
 
+    def test_permanent_telegram_rejection_is_quarantined_and_can_be_requeued(self):
+        self.baseline("a")
+        self.set_feeds({"a": [self.item("a", "news")]})
+        self.clients.send_error = TelegramError(status_code=401)
+        with self.assertLogs("pixelbot", level="ERROR"):
+            self.app.tick()
+        self.assertEqual(self.state("news"), "skipped")
+        failure = self.db.execute(
+            "SELECT article_id,status_code FROM delivery_failures").fetchone()
+        self.assertEqual(tuple(failure), (self.db.execute(
+            "SELECT id FROM articles WHERE title='news'").fetchone()[0], 401))
+
+        # A later polling tick must not retry a permanent rejection endlessly.
+        self.clients.send_error = None
+        self.app.tick()
+        self.assertEqual(self.clients.send_calls, ["news"])
+
+        failed_id = failure["article_id"]
+        self.db.close()
+        try:
+            with mock.patch.dict(os.environ, {"DB_PATH": self.path}, clear=True):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(bot.main(["--list-failed"]), 0)
+                self.assertIn(f"{failed_id}\tHTTP 401", output.getvalue())
+                self.assertEqual(bot.main(["--retry-failed", str(failed_id)]), 0)
+        finally:
+            self.db = bot.open_database(self.path)
+            self.app = bot.Orchestrator(self.db, self.config, self.sources, self.clients, max_items=10)
+        self.app.tick()
+        self.assertEqual(self.state("news"), "sent")
+        self.assertEqual(self.clients.send_calls, ["news", "news"])
+
     def test_unknown_pauses_other_sends_then_confirmed_delivery_dedups(self):
         self.baseline("a", "b")
         self.set_feeds({"a": [self.item("a", "same")], "b": [self.item("b", "same", "other")]})

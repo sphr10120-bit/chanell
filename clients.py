@@ -147,10 +147,23 @@ def _recent_event_data(recent_events: Any) -> list[dict[str, str]]:
     return result
 
 
-def _retry_after(response: Any) -> int | None:
+def _retry_after(response: Any, *, body_fallback: bool = False) -> int | None:
     value = response.headers.get("Retry-After", "")
-    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 6:
-        return int(value)
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 10:
+        parsed = int(value)
+        if parsed <= 2_147_483_647:
+            return parsed
+    if body_fallback:
+        try:
+            data = response.json()
+        except (ValueError, requests.RequestException, AttributeError):
+            return None
+        try:
+            parsed = data["parameters"]["retry_after"]
+        except (KeyError, TypeError):
+            return None
+        if type(parsed) is int and 0 <= parsed <= 2_147_483_647:
+            return parsed
     return None
 
 
@@ -167,7 +180,7 @@ def _http_error(service: str, response: Any, error_cls: type[ClientError]) -> Cl
     }
     detail = descriptions.get(status, "service error" if status >= 500 else "request failed")
     return error_cls(f"{service} HTTP {status}: {detail}", status_code=status,
-                     retry_after=_retry_after(response),
+                     retry_after=_retry_after(response, body_fallback=(service == "Telegram" and status == 429)),
                      uncertain=service == "Telegram" and (status >= 500 or status == 408 or 300 <= status < 400))
 
 

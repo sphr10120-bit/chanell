@@ -387,6 +387,28 @@ class TelegramTests(unittest.TestCase):
                 self.assertNotIn("123:token", str(caught.exception))
 
     @patch("clients.requests.post")
+    def test_telegram_429_reads_retry_after_from_json_body(self, post):
+        post.return_value = FakeResponse(
+            {"ok": False, "parameters": {"retry_after": 600}}, 429)
+        with self.assertRaises(clients.TelegramError) as caught:
+            clients.send_message("123:token", "@channel", "عنوان", "اول", "دوم")
+        self.assertFalse(caught.exception.uncertain)
+        self.assertEqual(caught.exception.retry_after, 600)
+
+        post.return_value = FakeResponse(
+            {"ok": False, "parameters": {"retry_after": True}}, 429)
+        with self.assertRaises(clients.TelegramError) as caught:
+            clients.send_message("123:token", "@channel", "عنوان", "اول", "دوم")
+        self.assertIsNone(caught.exception.retry_after)
+
+        post.return_value = FakeResponse(
+            {"ok": False, "parameters": {"retry_after": 600}}, 429,
+            {"Retry-After": "15"})
+        with self.assertRaises(clients.TelegramError) as caught:
+            clients.send_message("123:token", "@channel", "عنوان", "اول", "دوم")
+        self.assertEqual(caught.exception.retry_after, 15)
+
+    @patch("clients.requests.post")
     def test_invalid_telegram_input_never_requests(self, post):
         for token, chat, title, p1, p2 in [
             ("../token", "@x", "t", "p", "p"),
